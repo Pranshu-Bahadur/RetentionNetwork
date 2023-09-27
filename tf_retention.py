@@ -97,5 +97,4 @@ class MultiScaleRetention(Layer):
         x = tf.concat([headi(xi) for headi, xi in zip(self.heads, x)], -1)
         Y = self.gn(x)
         x = self.wo(W * Y)
-        print(x)
         return x
