@@ -75,7 +75,7 @@ class RecurrentRetention(Layer):
 
 
 class MultiScaleRetention(Layer):
-    def __init__(self, retention_layer=ParallelRetNetLayer, dim, hdim=128, seq_len=50, **kwargs):
+    def __init__(self, dim, hdim=128, seq_len=50, retention_layer=ParallelRetNetLayer, **kwargs):
         super(MultiScaleRetention, self).__init__()
         dims = dim
         gamma = 1 - (2 ** (-5 - torch.arange(0, hdim)))
