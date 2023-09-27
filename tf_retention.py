@@ -82,7 +82,7 @@ class MultiScaleRetention(Layer):
         gamma = gamma.numpy().tolist()
         self.dim = dim
         self.hdim = hdim
-        self.heads = [ParallelRetNetLayer(dim, gamma=gamma[head], num_heads=dim//hdim, seq_len=seq_len) for head in range(dim // hdim)]
+        self.heads = [ParallelRetNetLayer(hdim, gamma=gamma[head], num_heads=dim//hdim, seq_len=seq_len, gn_huh=False) for head in range(dim // hdim)]
         self.gn = GroupNormalization(hdim)
         self.wg = Sequential([
             Dense(dims, use_bias=False, **kwargs),
