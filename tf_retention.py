@@ -59,7 +59,6 @@ class RecurrentRetention(Layer):
 
     def call(self, x):
         Q, K, V = [fn(x) for fn in self.retention.values()]
-        state_rnn = self.s
         bias = tf.reduce_sum(tf.math.multiply(K, V), -1)
 
         s = [0 for i in range(self.seq_len)]
