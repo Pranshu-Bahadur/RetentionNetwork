@@ -33,7 +33,7 @@ class ParallelRetNetLayer(Layer):
     decay_factors = gamma ** (tf.expand_dims(indices, 1) - indices)
     self.decay = tf.ones((seq_len, seq_len), dtype=tf.float32) * decay_factors
     if self.gn_huh:
-      self.gn = GroupNormalization(seq_len)
+      self.gn = GroupNormalization(dim)
 
   def call(self, x):
     tf.cast(x, tf.float32)
