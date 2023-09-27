@@ -90,10 +90,11 @@ class MultiScaleRetention(Layer):
             ReLU()
         ])
         self.wo = Dense(dims, use_bias=False, **kwargs)
-        def call(self, x):
-            W = self.wg(x)
-            x = tf.split(x, self.dim//self.hdim, 2)
-            x = tf.concat([headi(xi) for headi, xi in zip(self.heads, x)], -1)
-            Y = self.gn(x)
-            x = self.wo(W * tf.transpose(Y, perm=[0, 2, 1]))
+    
+    def call(self, x):
+        W = self.wg(x)
+        x = tf.split(x, self.dim//self.hdim, 2)
+        x = tf.concat([headi(xi) for headi, xi in zip(self.heads, x)], -1)
+        Y = self.gn(x)
+        x = self.wo(W * tf.transpose(Y, perm=[0, 2, 1]))
         return x
