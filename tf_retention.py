@@ -24,26 +24,25 @@ class ParallelRetNetLayer(Layer):
     self.gamma = gamma
     self.num_heads = num_heads
     self.gn_huh = gn_huh
-
     self.retention = {
         "query" : Dense(dim, use_bias=True),
         "key" : Dense(dim, use_bias=True),
         "value" : Dense(dim, use_bias=True),
     }
-
-    indices = tf.range(seq_len, dtype=tf.float64)
+    indices = tf.range(seq_len, dtype=tf.float32)
     decay_factors = gamma ** (tf.expand_dims(indices, 1) - indices)
     self.decay = tf.ones((seq_len, seq_len), dtype=tf.float64) * decay_factors
-
     if self.gn_huh:
       self.gn = GroupNormalization(seq_len)
 
   def call(self, x):
+    tf.cast(x, tf.float32)
     Q, K, V = [fn(x) for fn in self.retention.values()]
     D = self.decay
     x = Q@tf.transpose(K, perm=[0, 2, 1])
     x = x*D
     x = x@V
+
     return self.gn(x) if self.gn_huh else x
 
 class RecurrentRetention(Layer):
