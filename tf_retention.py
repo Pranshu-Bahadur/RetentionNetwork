@@ -25,13 +25,13 @@ class ParallelRetNetLayer(Layer):
     self.num_heads = num_heads
     self.gn_huh = gn_huh
     self.retention = {
-        "query" : Dense(dim, use_bias=True),
-        "key" : Dense(dim, use_bias=True),
-        "value" : Dense(dim, use_bias=True),
+        "query" : Dense(dim, use_bias=False, dtype='float32'),
+        "key" : Dense(dim, use_bias=False, dtype='float32'),
+        "value" : Dense(dim, use_bias=False, dtype='float32'),
     }
     indices = tf.range(seq_len, dtype=tf.float32)
     decay_factors = gamma ** (tf.expand_dims(indices, 1) - indices)
-    self.decay = tf.ones((seq_len, seq_len), dtype=tf.float64) * decay_factors
+    self.decay = tf.ones((seq_len, seq_len), dtype=tf.float32) * decay_factors
     if self.gn_huh:
       self.gn = GroupNormalization(seq_len)
 
