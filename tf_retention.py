@@ -75,7 +75,7 @@ class RecurrentRetention(Layer):
 
 
 class MultiScaleRetention(Layer):
-    def __init__(self, dim, hdim=128, seq_len=50, **kwargs):
+    def __init__(self, retention_layer=ParallelRetNetLayer, dim, hdim=128, seq_len=50, **kwargs):
         super(MultiScaleRetention, self).__init__()
         dims = dim
         gamma = 1 - (2 ** (-5 - torch.arange(0, hdim)))
@@ -83,7 +83,7 @@ class MultiScaleRetention(Layer):
         gamma = gamma.numpy().tolist()
         self.dim = dim
         self.hdim = hdim
-        self.heads = [RecurrentRetention(hdim, gamma[head], seq_len=seq_len) for head in range(dim // hdim)]
+        self.heads = [ParallelRetNetLayer(dim, gamma[head], num_heads=dim//hdim, seq_len=seq_len) for head in range(dim // hdim)]
         self.gn = GroupNormalization(hdim)
         self.wg = Sequential([
             Dense(dims, use_bias=False, **kwargs),
