@@ -16,34 +16,47 @@ from tensorflow.keras import Sequential
 from tensorflow.keras.layers import Layer, Dense, ReLU, LayerNormalization, RNN, SimpleRNNCell
 from tensorflow.keras.layers import Layer, Dense, LayerNormalization
 
-class ParallelRetNetLayer(Layer):
-  def __init__(self, dim, seq_len=50, gamma=0.96875, num_heads=4, gn_huh=True, **kwargs):
-    super(ParallelRetNetLayer, self).__init__()
-    self.dim = dim
-    self.seq_len = seq_len
-    self.gamma = gamma
-    self.num_heads = num_heads
-    self.gn_huh = gn_huh
-    self.retention = {
-        "query" : Dense(dim, use_bias=False, dtype='float32'),
-        "key" : Dense(dim, use_bias=False, dtype='float32'),
-        "value" : Dense(dim, use_bias=False, dtype='float32'),
-    }
-    indices = tf.range(seq_len, dtype=tf.float32)
-    decay_factors = gamma ** (tf.expand_dims(indices, 1) - indices)
-    self.decay = tf.ones((seq_len, seq_len), dtype=tf.float32) * decay_factors
-    if self.gn_huh:
-      self.gn = GroupNormalization(dim)
 
-  def call(self, x):
-    tf.cast(x, tf.float32)
-    Q, K, V = [fn(x) for fn in self.retention.values()]
-    D = self.decay
-    x = Q@tf.transpose(K, perm=[0, 2, 1])
-    x = x*D
-    x = x@V
 
-    return self.gn(x) if self.gn_huh else x
+
+
+
+import tensorflow as tf
+from tensorflow.keras.layers import Layer, Dense
+from torch.nn import RNN
+import torch
+
+class Retention(Layer):
+    def __init__(self, dim = 32, nheads = 2, seq_len = 50, gamma = 0.9865):
+        super().__init__()
+
+        _dense_kwargs = {
+                "use_bias" : False,
+                "dtype" : 'float32'
+                }
+        _layer_names = ['Q', 'K', 'V']
+        _layer = Dense(dim, **_dense_kwargs)
+        self.layers = dict.fromkeys(_layer_names, _layer)
+
+        _indices = torch.arange(seq_len, dtype=torch.float)
+        _decay_factors = gamma ** (_indices.unsqueeze(1) - _indices)
+        D = tf.ones((seq_len, seq_len), dtype='float32') * _decay_factors.numpy()
+        self.D = tf.transpose(tf.linalg.band_part(D, 0, -1), perm=[1, 0])
+
+    def call(self, x):
+        Q, K, V = [f(z) for f, z in zip(self.layers.values(), x)]
+        _, _, d = Q.shape
+        x = Q@tf.transpose(K, perm=[0, 2, 1])
+        x /= d**0.5
+        D = self.D
+        D /= tf.reduce_sum(D, 1)**0.5
+
+        x = x*D
+        x = tf.maximum(tf.abs(tf.math.reduce_sum(x, 0)), 1)
+        x = x@V
+        return x
+
+
 
 class RecurrentRetention(Layer):
     def __init__(self, dim, gamma, seq_len=50, **kwargs):
@@ -70,28 +83,29 @@ class RecurrentRetention(Layer):
         x = tf.multiply(tf.transpose(S), Q)
         return x
 
-
 class MultiScaleRetention(Layer):
-    def __init__(self, dim, hdim=128, seq_len=50, retention_layer=ParallelRetNetLayer, **kwargs):
+    def __init__(self, dim, hdim=128, seq_len=50, **kwargs):
         super(MultiScaleRetention, self).__init__()
         dims = dim
         gamma = 1 - (2 ** (-5 - torch.arange(0, hdim)))
-
         gamma = gamma.numpy().tolist()
         self.dim = dim
         self.hdim = hdim
-        self.heads = [RecurrentRetention(hdim, gamma=gamma[head], seq_len=seq_len) for head in range(dim // hdim)]
-        self.gn = GroupNormalization(hdim)
+        self.heads = [Retention(hdim, gamma=gamma[head], seq_len=seq_len) for head in range(dim // hdim)]
+        self.gn = GroupNormalization(1)
         self.wg = Sequential([
             Dense(dims, use_bias=False, **kwargs),
             ReLU()
         ])
         self.wo = Dense(dims, use_bias=False, **kwargs)
-    
-    def call(self, x):
+
+    def call(self, x, k, v):
         W = self.wg(x)
-        x = tf.split(x, self.dim//self.hdim, 2)
-        x = tf.concat([headi(xi) for headi, xi in zip(self.heads, x)], -1)
+        q = tf.split(x, self.dim//self.hdim, 2)
+        k = tf.split(k, self.dim//self.hdim, 2)
+        v = tf.split(v, self.dim//self.hdim, 2)
+        x = tf.concat([headi([qi, ki, vi]) for headi, qi, ki, vi in zip(self.heads, q, k, v)], -1)
         Y = self.gn(x)
         x = self.wo(W * Y)
         return x
+
