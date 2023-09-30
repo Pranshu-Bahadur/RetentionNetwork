@@ -50,30 +50,21 @@ class Retention(Layer):
         x /= d**0.5
         D = self.D
         D /= tf.reduce_sum(D, 1)**0.5
-
         x = x*D
-        x = tf.maximum(tf.abs(tf.math.reduce_sum(x, 0)), 1)
+        x = tf.vectorized_map(lambda xs: tf.math.divide(xs, tf.maximum(tf.abs(tf.math.reduce_sum(xs, -1)), 1)), x)
         x = x@V
         return x
 
 
-
-class RecurrentRetention(Layer):
-    def __init__(self, dim, gamma, seq_len=50, **kwargs):
+class RecurrentRetention(Retention):
+    def __init__(self, dim = 32, nheads = 2, seq_len = 50, gamma = 0.9865):
         super(RecurrentRetention, self).__init__()
-        dims = dim
-        self.retention = {
-            "query": Dense(units=dim, use_bias=False, **kwargs),
-            "key": Dense(units=dim, use_bias=False, **kwargs),
-            "value": Dense(units=dim, use_bias=False, **kwargs),
-        }
         self.gamma = tf.cast(gamma, tf.float32)
         self.seq_len=seq_len
 
     def call(self, x):
-        Q, K, V = [fn(x) for fn in self.retention.values()]
-        bias = tf.reduce_sum(tf.math.multiply(K, V), -1)
-
+        Q, K, V = [f(z) for f, z in zip(self.layers.values(), x)]
+        _, _, d = Q.shape
         s = [0 for i in range(self.seq_len)]
         for t in range(1, self.seq_len):
           s[t] = (s[t-1]*self.gamma) + tf.transpose(K[:, t, :], perm=[1, 0])@V[:, t , :]
@@ -91,7 +82,7 @@ class MultiScaleRetention(Layer):
         gamma = gamma.numpy().tolist()
         self.dim = dim
         self.hdim = hdim
-        self.heads = [Retention(hdim, gamma=gamma[head], seq_len=seq_len) for head in range(dim // hdim)]
+        self.heads = [RecurrentRetention(hdim, gamma=gamma[head], seq_len=seq_len) for head in range(dim // hdim)]
         self.gn = GroupNormalization(1)
         self.wg = Sequential([
             Dense(dims, use_bias=False, **kwargs),
@@ -99,13 +90,9 @@ class MultiScaleRetention(Layer):
         ])
         self.wo = Dense(dims, use_bias=False, **kwargs)
 
-    def call(self, x, k, v):
+    def call(self, x):
         W = self.wg(x)
-        q = tf.split(x, self.dim//self.hdim, 2)
-        k = tf.split(k, self.dim//self.hdim, 2)
-        v = tf.split(v, self.dim//self.hdim, 2)
-        x = tf.concat([headi([qi, ki, vi]) for headi, qi, ki, vi in zip(self.heads, q, k, v)], -1)
+        x = tf.concat([headi([x, x, x]) for headi in self.heads], -1)
         Y = self.gn(x)
         x = self.wo(W * Y)
         return x
-
