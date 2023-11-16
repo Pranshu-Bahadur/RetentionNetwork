@@ -1,212 +1,202 @@
-# Imports
 import tensorflow as tf
-from pandas import read_csv, DataFrame, concat
-from tensorflow.keras import Model, Sequential
-from tensorboard.plugins.projector import ProjectorConfig, visualize_embeddings
-from tensorflow.keras.layers import TextVectorization, Input, Embedding, Conv1D,\
- MultiHeadAttention, LayerNormalization, Add, Dense, Flatten, BatchNormalization,\
-  DepthwiseConv1D, MaxPooling1D,\
-   GlobalAveragePooling1D, Concatenate, GroupNormalization, LSTM, GlobalMaxPooling1D, Activation,\
-    Dropout, Attention, Dot, Bidirectional, GRU
-from sklearn.metrics.pairwise import cosine_similarity
-from tensorflow.keras.metrics import AUC
-import numpy as np
-import torch
 from tensorflow.keras import Sequential
-from tensorflow.keras.layers import Layer, Dense, ReLU, LayerNormalization, RNN, SimpleRNNCell
-from tensorflow.keras.layers import Layer, Dense, LayerNormalization
-import tensorflow as tf
-from tensorflow.keras.layers import Layer, Dense
-from torch.nn import RNN
+from tensorflow.keras.layers import Layer, LayerNormalization, GroupNormalization, Dense, SimpleRNNCell, RNN, LSTM, Bidirectional, LSTMCell
 import torch
+from itertools import repeat
 
-def PE(length, dim):
-  dim /= 2
-
-  posn = torch.arange(length).unsqueeze(1).float().numpy()
-  dims = torch.arange(dim).unsqueeze(0).float().numpy()/dim
-
-  posn_encoding = posn / (1e+4**dims)
-  posn_encoding = tf.concat([np.sin(posn_encoding), np.cos(posn_encoding)], -1)
-  return tf.cast(posn_encoding, dtype=tf.float32)
+import tensorflow as tf
+from tensorflow.keras.layers import Layer, LayerNormalization, Dense, SimpleRNNCell, RNN, LSTM, Bidirectional, LSTMCell
 
 
-class PositionalEmbedding(tf.keras.layers.Layer):
-  def __init__(self, vocab_size, d_model, seq_len=50):
-    super().__init__()
-    self.d_model = d_model
-    self.embedding = tf.keras.layers.Embedding(vocab_size, d_model, mask_zero=True, trainable=True)
-    self.pos_encoding = PE(seq_len, dim=d_model)
+import tensorflow as tf
+from tensorflow.keras import Sequential
+from tensorflow.keras.layers import Layer, LayerNormalization, GroupNormalization, Dense, SimpleRNNCell, RNN, LSTM, Bidirectional, LSTMCell
+import torch
+from itertools import repeat
 
-  def compute_mask(self, *args, **kwargs):
-    return self.embedding.compute_mask(*args, **kwargs)
+import tensorflow as tf
+from tensorflow.keras.layers import Layer, LayerNormalization, Dense, SimpleRNNCell, RNN, LSTM, Bidirectional, LSTMCell
 
-  def call(self, input_ids):
-    length = tf.shape(input_ids)[1]
-    x = self.embedding(input_ids)
-    input_ids = tf.cast(input_ids, tf.int32)
-    encodings = x + (self.pos_encoding[tf.newaxis, :length, :])
+class RecurrentRetention(tf.compat.v1.nn.rnn_cell.RNNCell):
+    def __init__(self,
+                 input_size,
+                 hidden_size=32,
+                 gamma=0.984375,
+                 trainable=True,
+                 dtype=None,
+                 **kwargs):
+        super(RecurrentRetention, self).__init__(trainable=trainable,
+                                        dtype=dtype,
+                                        **kwargs)
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+        self.r_layers = {
+            'Q' : Dense(hidden_size),
+            'K' : Dense(hidden_size),
+            'V' : Dense(hidden_size)
+        }
 
-    x *= tf.math.sqrt(tf.cast(self.d_model, tf.float32))
-    x += encodings
-    return x
+        self.gamma = tf.Variable(gamma, trainable=True)
 
-class BaseAttention(tf.keras.layers.Layer):
-  def __init__(self, **kwargs):
-    super().__init__()
-    self.mha = tf.keras.layers.MultiHeadAttention(**kwargs)
-    self.layernorm = tf.keras.layers.LayerNormalization()
-    self.add = tf.keras.layers.Add()
+    @property
+    def state_size(self):
+        return tf.TensorShape([self.hidden_size, self.hidden_size])
+
+    @property
+    def output_size(self):
+        return self.hidden_size
+
+    def call(self, inputs, state):
+      q, k, v = [tf.cast(f(inputs), tf.float32) for f in self.r_layers.values()]
+      s = self.gamma*state + tf.linalg.matmul(k, v, transpose_a=True)#tf.transpose(k, perm=[1, 0])@v
+      x = tf.einsum('bi, bzk -> bk', q, s)
+      return x, s
 
 
 class FeedForward(tf.keras.layers.Layer):
-  def __init__(self, d_model, dff, dropout_rate=0.1):
+  def __init__(self, d_model, dff, dropout_rate=0.1, activation='gelu'):
     super().__init__()
     self.seq = tf.keras.Sequential([
-      tf.keras.layers.Dense(dff, activation='relu'),
+      tf.keras.layers.Dense(dff, activation=activation),
       tf.keras.layers.Dense(d_model),
       tf.keras.layers.Dropout(dropout_rate)
     ])
-    self.add = tf.keras.layers.Add()
-    self.layer_norm = tf.keras.layers.LayerNormalization()
 
   def call(self, x):
-    x = self.add([x, self.seq(x)])
-    x = self.layer_norm(x)
-    return x
-
-
-class EncoderLayer(tf.keras.layers.Layer):
-  def __init__(self,*, d_model, num_heads, dff, dropout_rate=0.1):
-    super().__init__()
-
-    self.self_attention = GlobalSelfAttention(
-        num_heads=num_heads,
-        key_dim=d_model,
-        dropout=dropout_rate)
-
-    self.ffn = FeedForward(d_model, dff)
-
-  def call(self, x):
-    x = self.self_attention(x)
-    x = self.ffn(x)
-    return x
+    return self.seq(x)
 
 
 class Retention(Layer):
-    def __init__(self, dim = 32, nheads = 2, seq_len = 50, gamma = 0.9865):
+    def __init__(self, dim=128, gamma = 0.9865, **kwargs):
         super().__init__()
-
         _dense_kwargs = {
-                "use_bias" : False,
-                "dtype" : 'float32'
+                "use_bias" : True,
+                "dtype" : "float32"
                 }
-        _layer_names = ['Q', 'K', 'V']
-        _layer = Dense(dim, **_dense_kwargs)
-        self.r_layers = dict.fromkeys(_layer_names, _layer)
+        self._qkv_layers = [Dense(dim, **_dense_kwargs),
+                            Dense(dim, **_dense_kwargs),
+                            Dense(dim, **_dense_kwargs)]
+        self.gamma = gamma
 
-        _indices = torch.arange(seq_len, dtype=torch.float)
-        _decay_factors = gamma ** (_indices.unsqueeze(1) - _indices)
-        D = tf.ones((seq_len, seq_len), dtype='float32') * _decay_factors.numpy()
-        self.D = tf.transpose(tf.linalg.band_part(D, 0, -1), perm=[1, 0])
-
-    def call(self, x):
-        Q, K, V = [f(z) for f, z in zip(self.r_layers.values(), x)]
-        _, _, d = Q.shape
+    def call(self, x, training=False):
+        Q, K, V = [f(z) for f, z in zip(self._qkv_layers, x)]
+        _, s, d = Q.shape
+        #b = b if b is not None else 1
         x = Q@tf.transpose(K, perm=[0, 2, 1])
-        x /= d**0.5
-        D = self.D
-        D /= tf.reduce_sum(D, 1)**0.5
+        x /= d**0.5 #Normalization Trick 1
+        D = self._compute_decay(s, self.gamma)
+        D /= tf.reduce_sum(D, -1)**0.5 #Normalization Trick 2
+        #D = tf.stack([*repeat(D, b)])
         x = x*D
-        x = tf.vectorized_map(lambda xs: tf.math.divide(xs, tf.maximum(tf.abs(tf.math.reduce_sum(xs, -1)), 1)), x)
+        _norm_3 = lambda xs: xs/tf.maximum(tf.abs(tf.math.reduce_sum(xs, -1)), 1)
+        x = tf.vectorized_map(_norm_3, x) #Normalization Trick 3
         x = x@V
         return x
 
-
-class RecurrentRetention(Retention):
-    def __init__(self, dim = 32, nheads = 2, seq_len = 50, gamma = 0.9865):
-        super(RecurrentRetention, self).__init__()
-        self.gamma = tf.cast(gamma, tf.float32)
-        self.seq_len=seq_len
-
-    def call(self, x):
-        Q, K, V = [f(z) for f, z in zip(self.r_layers.values(), x)]
-        _, _, d = Q.shape
-        s = [0 for i in range(self.seq_len)]
-        for t in range(1, self.seq_len):
-          s[t] = (s[t-1]*self.gamma) + tf.transpose(K[:, t, :], perm=[1, 0])@V[:, t , :]
-        #s[0] = 0
-        S = tf.convert_to_tensor(s)
-        S = tf.reshape(tf.math.reduce_sum(S, -1), [-1, self.seq_len])
-        x = tf.multiply(tf.transpose(S), Q)
-        return x
-
-class ChunkwiseRetention(Retention):
-  def __init__(self, dim = 32, nheads = 2, seq_len = 50, gamma = 0.9865):
-    super(ChunkwiseRetention, self).__init__()
-    self.gamma = tf.cast(gamma, tf.float32)
-    self.seq_len=seq_len
-    self.dim = dim
-    self.B = 2
-
-
-    _indices = torch.arange(self.B, dtype=torch.float)
-    _decay_factors = gamma ** (_indices.unsqueeze(1) - _indices)
-    L = tf.ones((self.B, self.B), dtype='float32') * _decay_factors.numpy()
-    self.L = tf.transpose(tf.linalg.band_part(L, 0, -1), perm=[1, 0])
-
-    
-    _indices = torch.arange(seq_len//self.B, dtype=torch.float)
-    self.Z = tf.convert_to_tensor((gamma ** (self.B -_indices.unsqueeze(1) - 1)).squeeze(1).numpy())
-
-  def call(self, x):
-
-    Q, K, V = [tf.split(f(z), self.seq_len//self.B, 1) for f, z in zip(self.r_layers.values(), x)]
-    #d = x[-1].shape[-1]
-    Vz =  [vi*z for z, vi in zip(self.Z.numpy().tolist(), V)]
-    X = [Vz[i] for i in range(len(Q))]
-    R = [(tf.transpose(K[i], perm=[0, 2, 1])@Vz[i]) for i in range(self.seq_len//self.B)]
-
-    for i in range(1, self.seq_len//self.B):
-      G = (self.gamma**self.B)*R[i-1]
-      R[i] = (tf.transpose(K[i], perm=[0, 2, 1])@Vz[i]) + G
-      X[i-1] = (Q[i]@R[i-1])*(self.gamma**(i+1))
-
-    
-    for i in range(len(Q)):
-      S = tf.einsum('bij, bxk -> bik', Q[i], tf.transpose(K[i], perm=[0, 2, 1]))
-      X[i] = ((S*self.L)@V[i])+X[i]
-    X= tf.concat(X, 1)
-    print(X.shape)
-    return X
-
-
-
-
+    def _compute_decay(self, seq_len, gamma = 0.96875):
+        _indices = list(range(0, seq_len))
+        _decay_factors = [gamma**(i-j) if i>=j else 0 for i in _indices for j in _indices]
+        D = tf.reshape(tf.convert_to_tensor(_decay_factors, dtype='float32'), (seq_len, seq_len))
+        #mask = tf.eye(seq_len, dtype=tf.float32)
+        #mask += tf.roll(mask, shift=-1, axis=-1)+tf.roll(mask, shift=-2, axis=-1)
+        return D#*mask
 
 class MultiScaleRetention(Layer):
-    def __init__(self, dim, hdim=32, seq_len=50, **kwargs):
+    def __init__(self, dim, hdim=100, retention_layer=Retention, **kwargs):
       super(MultiScaleRetention, self).__init__()
-      dims = dim
-      gamma = 1 - (2 ** (-5 - torch.arange(0, hdim)))
+      gamma = 1 - (2 ** (-5 - torch.arange(0, dim//hdim).float()))
       gamma = gamma.numpy().tolist()
       self.dim = dim
       self.hdim = hdim
-      self.heads = [ChunkwiseRetention(dim=hdim, gamma=gamma[head], seq_len=seq_len) for head in range(dim // hdim)]
-      self.gn = GroupNormalization()
+      self.heads = [ChunkwiseRetention(hdim, gamma=gamma[head], **kwargs) for head in range(dim // hdim)]
+      self.gn = GroupNormalization(dim//hdim, scale=False)
       self.wg = Sequential([
-            Dense(dims, use_bias=False, activation = 'swish', **kwargs),
+            Dense(dim, use_bias=True, activation = 'swish', **kwargs),
         ])
-      self.wo = Dense(dims, use_bias=False, **kwargs)
+      self.wo = Dense(dim, use_bias=True, **kwargs)
 
-    def call(self, x):
-      x, k, v = x, x, x
-      W = self.wg(x)
-      q = tf.split(x, self.dim//self.hdim, 2)
-      k = tf.split(k, self.dim//self.hdim, 2)
-      v = tf.split(v, self.dim//self.hdim, 2)
-      x = [headi([qi, ki, vi]) for headi, qi, ki, vi in zip(self.heads, q, k, v)]
+    def call(self, q, k, v):
+      W = self.wg(q)
+      #q, k, v = list(map(lambda val: tf.split(val, self.dim//self.hdim, 2), x))
+      x = [headi(q) for headi in self.heads]
       x = tf.concat(x, -1)
       Y = self.gn(x)
-      x = self.wo(W * Y)
+      x = self.wo(W*Y)
       return x
+
+class RetentionEncoder(Layer):
+    def __init__(self, dim=540, hdim=100, retention_layer=Retention, **kwargs):
+        super().__init__()
+        self.layer_norm = LayerNormalization()
+        self.msr = MultiScaleRetention(dim, hdim, retention_layer=retention_layer)
+        self.layer_norm1 = LayerNormalization()
+        self.ffn = FeedForward(dim, dim)
+
+    def call(self, x, training=False):
+      xn = self.layer_norm(x)
+      msr_x = self.msr(xn, xn, xn) + xn
+      x = self.ffn(self.layer_norm1(msr_x)) + msr_x
+      return x
+
+
+class ChunkwiseRetention(Layer):
+  def __init__(self, hidden_dim, gamma):
+    super().__init__()
+    self.rnn = RNN(ChunkwiseRecurrentRetention(hidden_dim, hidden_dim, gamma), return_sequences=True)
+    self.gamma = gamma
+    self.hdim = hidden_dim
+
+  def _compute_decay(self, seq_len, gamma = 0.96875):
+      _indices = list(range(0, seq_len))
+      _decay_factors = [gamma**(i-j) if i>=j else 0 for i in _indices for j in _indices]
+      D = tf.reshape(tf.convert_to_tensor(_decay_factors, dtype='float32'), (seq_len, seq_len))
+      #mask = tf.eye(seq_len, dtype=tf.float32)
+      #mask += tf.roll(mask, shift=-1, axis=-1)
+      return D#*mask
+
+  def call(self, x):
+    b, s, d = x.shape
+    D = self._compute_decay(s, self.gamma)
+    D /= tf.reduce_sum(D, -1)**0.5
+    _num_chunks = s//2
+    chunks = tf.split(x, _num_chunks, -2)
+    chunks = tf.stack(chunks, 1)
+    self.rnn.cell.D = tf.cast(D, tf.float32)
+    self.rnn.cell.chunk_size = s//_num_chunks
+    return tf.reshape(self.rnn(chunks), (tf.shape(x)[0], s, self.hdim))
+
+class ChunkwiseRecurrentRetention(tf.compat.v1.nn.rnn_cell.RNNCell):
+    def __init__(self,
+                 input_size,
+                 hidden_size=32,
+                 gamma=0.984375,
+                 trainable=True,
+                 dtype=None,
+                 **kwargs):
+        super(ChunkwiseRecurrentRetention, self).__init__(trainable=trainable,
+                                        dtype=dtype,
+                                        **kwargs)
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+        self.qkv = Dense(hidden_size*3)
+        self.gamma = gamma
+        self.counter = 1
+
+    @property
+    def state_size(self):
+        return tf.TensorShape([self.hidden_size, self.hidden_size])
+
+    @property
+    def output_size(self):
+        return self.hidden_size
+
+    def call(self, inputs, state):
+      q, k, v = tf.split(self.qkv(inputs), 3, -1)
+      s = state*self.gamma**self.chunk_size + tf.linalg.matmul(k, v*(self.gamma**(self.chunk_size-1-self.counter)), transpose_a=True)
+      x = ((tf.linalg.matmul(q, k, transpose_b=True)/self.hidden_size**0.5)*self.D[self.counter:self.counter+self.chunk_size, self.counter:self.counter+self.chunk_size])
+      _norm_3 = lambda xs: tf.math.divide(xs, tf.maximum(tf.abs(tf.math.reduce_sum(xs, 1)), 1))
+      x = tf.vectorized_map(_norm_3, x) #Normalization Trick 3
+      x = x@v + (q@state)*tf.expand_dims(tf.convert_to_tensor([*repeat(self.gamma**(self.counter+1), self.chunk_size)]), -1)
+      self.counter += 1
+      return x, s
+
